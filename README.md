@@ -1,12 +1,50 @@
 # CGH Inpatient Deterioration Dataset Preparation
 
-## 1. Project Objective
+This README explains how `Dataset_preparation_modified_v8_final_v1_fixed.ipynb` builds non-sequential modelling datasets for early inpatient deterioration prediction.
 
-This dataset preparation pipeline builds leakage-controlled, window-level modelling datasets for predicting inpatient deterioration events in CGH W36 patients using patient information, diagnosis groups, charted vital signs, and Respiree sensor vital signs.
+The document is written for a reader who has not seen the project before. It explains the dataset goal, source files, cohort rule, cleaning logic, sliding-window labels, feature groups, split design, and output files.
 
 ---
 
-## 2. Raw Data Sources
+## 0. Quick Orientation
+
+### What is one row in the final dataset?
+
+One row is **one prediction window for one hospital case**.
+
+It is not one patient, one admission, or one vital-sign measurement. A single case can generate many rows because a new window is created every 1 hour during the W36 monitoring period.
+
+### What does the model try to predict?
+
+At each `window_end`, the model uses information available before `window_end` to predict whether a new deterioration event will occur in the next `h` hours.
+
+### Main time periods
+
+| Term | Meaning |
+|---|---|
+| `W36 Start DT` | Start of the W36 monitoring episode for one case |
+| `Movement End DT` | End of the observable W36 monitoring episode |
+| `window_start` to `window_end` | Observation window used to create predictors |
+| `window_end` | Prediction time point |
+| `window_end` to `horizon_end` | Future prediction horizon used to assign labels |
+| `m_hours` | Observation-window length: 4, 6, 12, or 24 hours |
+| `h_hours` | Prediction-horizon length: 4, 6, or 12 hours |
+
+### Most important leakage-control rule
+
+Vital-sign predictors use only data before `window_end`. Outcome labels are checked only after `window_end` and before `horizon_end`.
+
+---
+
+## 1. Project Objective
+
+Build leakage-controlled, window-level datasets for predicting inpatient deterioration in CGH W36 patients using demographics, secondary diagnosis groups, charted vital signs, and Respiree sensor vital signs.
+
+---
+
+## 2. Data Sources
+
+### 2.1 Original raw data structure
 
 The project combines two data batches:
 
@@ -23,21 +61,31 @@ Each batch originally contains five source datasets:
 | `eHINTS_vitalSigns_ano` | Manually charted vital signs |
 | `Respiree_vital_sign` | Respiree sensor vital-sign time series |
 
-In the v8 notebook, these raw files have already been merged into prepared CSV files under:
+### 2.2 Files directly loaded by the v8 notebook
+
+The v8 notebook does **not** directly reload the ten raw files. It starts from prepared merged CSV files stored under:
 
 ```text
 /content/drive/My Drive/merged_240920_240822_prepared
 ```
 
-The notebook directly loads the following prepared files:
-
 | Prepared file | Role in v8 pipeline |
 |---|---|
-| `case_master_all_240920_240822.csv` | Main case-level table containing patient information, episode times, source-availability flags, and deterioration outcome fields |
-| `charted_vitals_all_240920_240822.csv` | Charted vital-sign records |
-| `diagnosis_summary_all_240920_240822.csv` | Case-level diagnosis summary; v8 uses secondary diagnoses only |
-| `sensor_timeseries_all_240920_240822.csv` | Respiree sensor vital-sign records |
-| `cohort_summary_all_240920_240822.csv` | Cohort-checking summary file |
+| `case_master_all_240920_240822.csv` | Main case-level table with patient information, W36 episode times, source-availability flags, and deterioration outcome fields |
+| `charted_vitals_all_240920_240822.csv` | Manually charted vital-sign records |
+| `diagnosis_summary_all_240920_240822.csv` | Case-level diagnosis summary; v8 uses `secondary_diagnosis_list` |
+| `sensor_timeseries_all_240920_240822.csv` | Respiree sensor vital-sign time series |
+| `cohort_summary_all_240920_240822.csv` | Cohort-checking summary file loaded for audit/reference |
+
+### 2.3 Relationship between raw files and prepared files
+
+```mermaid
+flowchart LR
+    A[Raw batch 240822<br/>5 source files] --> C[Prepared merged CSVs]
+    B[Raw batch 240920<br/>5 source files] --> C
+    C --> D[v8 dataset-building notebook]
+    D --> E[Window-level modelling CSVs]
+```
 
 ---
 
@@ -45,7 +93,7 @@ The notebook directly loads the following prepared files:
 
 The modelling cohort keeps only cases that appear in all required project data sources.
 
-In the v8 notebook, a case is included only when all of the following flags are equal to 1:
+In the v8 notebook, a case is included only when all these source-availability flags are equal to 1:
 
 ```python
 has_ehints_data == 1
@@ -54,7 +102,7 @@ has_charted_vitals == 1
 has_respiree_sensor == 1
 ```
 
-Cases are then further filtered to keep only valid monitoring episodes:
+The retained cases are then filtered to valid W36 monitoring episodes:
 
 ```python
 W36 Start DT_dt is not missing
@@ -62,78 +110,139 @@ Movement End DT_dt is not missing
 Movement End DT_dt > W36 Start DT_dt
 ```
 
-This means each retained case has outcome information, diagnosis information, charted vital signs, Respiree sensor data, and a valid W36 monitoring period.
+This means each final case has:
+
+- outcome information;
+- diagnosis information;
+- charted vital signs;
+- Respiree sensor vital signs;
+- a valid W36 start and end time.
 
 ---
 
 ## 4. Data Cleaning Steps
 
-The main cleaning steps are:
+### 4.1 Standardize case IDs
 
-1. **Standardize case IDs**
+All loaded tables are given a clean `case_no_deid_clean` column.
 
-   All source tables are assigned a clean `case_no_deid_clean` column. This removes extra spaces and fixes case IDs that may be read as values like `"123.0"` instead of `"123"`.
+The cleaning removes extra spaces and fixes IDs that may be read as values such as:
 
-2. **Convert time columns**
+```text
+123.0 -> 123
+```
 
-   Important case-level, charted-vital, and sensor-vital time columns are converted into datetime format. Invalid datetime values are coerced to missing.
+This step reduces failed joins caused by formatting differences across files.
 
-3. **Define case-level outcome flags**
+### 4.2 Convert datetime columns
 
-   Five deterioration labels are created at case level:
+The notebook converts important case-level, charted-vital, and sensor-vital time columns into datetime format. Invalid datetime values are coerced to missing.
 
-   - HD/ICU transfer
-   - O2 increase
-   - IV increase
-   - MET activation
-   - Death
+Important converted time columns include:
 
-   A composite label, `label_any_deterioration`, is also created.
+| Column | Purpose |
+|---|---|
+| `W36 Start DT_dt` | Monitoring episode start |
+| `Movement End DT_dt` | Monitoring episode end |
+| `O2 increased provision DT_dt` / `o2_increase_event_dt` | O2 increase event time source |
+| `Increased IV DT_dt` | IV increase event time |
+| `MET activation after W36 Admission_dt` | MET activation event time |
+| `Death Date_dt` | Death event time |
+| `next hd/icu admission dt_dt` | HD/ICU transfer event time |
+| `created_datetime_dt` | Charted-vital measurement time |
+| `sensor_datetime_dt` | Sensor-vital measurement time |
 
-4. **Define usable event timestamps**
+### 4.3 Define case-level outcome flags
 
-   Window-level labels require event timestamps. A case can be case-level positive but still have no usable event time for sliding-window labelling.
+The notebook first defines deterioration at case level. These flags answer: did this case ever have this event?
 
-5. **Clean O2 increase logic**
+| Case-level label | Main logic |
+|---|---|
+| `label_hd_icu` | `HD/ICU == 1` or non-missing next HD/ICU admission time |
+| `label_o2_increase` | Uses `o2_increase_confirmed == 1` when available; otherwise falls back to O2 event timestamp |
+| `label_iv_increase` | Non-missing IV increase timestamp |
+| `label_met` | Non-missing MET activation timestamp |
+| `label_death` | Death 1M, Death 3M, or non-missing death date |
+| `label_any_deterioration` | Any of the five event labels is positive |
 
-   If `o2_increase_confirmed` exists, the notebook uses this confirmation flag to define O2 increase. This avoids treating non-confirmed O2 timestamps as true O2 increase events.
+### 4.4 Define usable event timestamps
 
-6. **Use secondary diagnosis only**
+Window-level labels require event timestamps. A case may be case-level positive but still lack a usable event time.
 
-   Primary diagnosis is not used as a model feature because it may contain information assigned after W36 admission or discharge. Secondary diagnoses are grouped into clinically meaningful risk groups.
+The notebook creates these event-time columns:
 
-7. **Remove internal time columns before final saving**
+| Event-time column | Event |
+|---|---|
+| `event_time_hd_icu` | HD/ICU transfer |
+| `event_time_o2` | Confirmed O2 increase |
+| `event_time_iv` | IV increase |
+| `event_time_met` | MET activation |
+| `event_time_death` | Death |
 
-   Event-time columns and `Movement End DT` are used internally for labelling and censoring, but they are removed before the final modelling CSVs are saved.
+For O2 increase, if the case is not confirmed as O2 increase, its O2 timestamp is set to missing for labelling. This avoids false positive O2 windows caused by non-confirmed timestamps.
+
+### 4.5 Use secondary diagnosis only
+
+The v8 notebook uses `secondary_diagnosis_list` from `diagnosis_summary_all_240920_240822.csv`.
+
+Primary diagnosis is excluded from model features because it may contain information finalized after W36 admission or discharge.
+
+Secondary diagnoses are transformed into grouped dummy variables. A case can belong to multiple diagnosis groups.
+
+Examples of grouped diagnosis features include:
+
+```text
+secondary_dx_infection_sepsis
+secondary_dx_pneumonia
+secondary_dx_respiratory
+secondary_dx_cardiac
+secondary_dx_renal_any
+secondary_dx_acute_kidney_failure
+secondary_dx_ckd_stage_3_5_or_dialysis
+secondary_dx_diabetes_complication
+secondary_dx_malignancy
+secondary_dx_neuro_delirium_stroke
+secondary_diagnosis_count
+```
+
+The exact keyword rules are in notebook Cell 8A.
+
+### 4.6 Remove internal labelling columns before final saving
+
+Event-time columns and `Movement End DT` are needed for labelling and censoring. They are removed from the final modelling CSVs after labels are created.
 
 ---
 
 ## 5. Vital Sign Processing
 
-The notebook combines charted and sensor vital signs into one unified long-format vital-sign table.
+The notebook creates one unified long-format vital-sign table.
 
-### 5.1 Charted vital signs
-
-Charted vital signs are filtered to full-cohort cases and converted into a standard structure:
+The common format is:
 
 ```text
 case_no_deid_clean | vital_time | vital_name | vital_value
 ```
 
-The notebook can handle charted vitals in either long format or wide format.
+### 5.1 Charted vital signs
+
+Charted vital signs are filtered to full-cohort cases, assigned `vital_time`, and converted into long format if needed.
 
 Expected charted vital types include:
 
-- `HR`
-- `RR`
-- `SpO2`
-- `temperature`
-- `SBP`
-- `DBP`
+```text
+HR, RR, SpO2, temperature, SBP, DBP
+```
+
+The notebook also standardizes source-specific or duplicated names. For example:
+
+```text
+charted_HR -> HR
+charted_charted_HR -> HR
+```
 
 ### 5.2 Sensor vital signs
 
-Sensor records are kept only when:
+Sensor records are retained only when:
 
 ```python
 is_linked_to_case == 1
@@ -141,13 +250,13 @@ within_patientinfo_episode == 1
 sensor_datetime_dt is not missing
 ```
 
-Sensor vital columns are converted from wide format to long format:
+Sensor columns are converted from wide format to long format.
 
-- `RR`
-- `HR`
-- `SpO2`
-- `skin_temperature`
-- `body_temperature`
+Sensor vital types include:
+
+```text
+RR, HR, SpO2, skin_temperature, body_temperature
+```
 
 ### 5.3 Unified vital-sign names
 
@@ -160,10 +269,12 @@ Clinically comparable charted and sensor variables are merged into one stream:
 | Charted SpO2 + sensor SpO2 | `SpO2` |
 | Charted temperature + sensor body temperature | `temperature` |
 | Sensor skin temperature | `skin_temperature` |
+| Charted SBP | `SBP` |
+| Charted DBP | `DBP` |
 
-`skin_temperature` is intentionally kept separate because it is not the same clinical variable as body temperature.
+`skin_temperature` is kept separate because it is not the same clinical variable as body temperature.
 
-### 5.4 Full-window vital-sign features
+### 5.4 Full-window vital features
 
 For each vital sign inside each observation window, the notebook creates:
 
@@ -177,11 +288,27 @@ For each vital sign inside each observation window, the notebook creates:
 | `_last` | Last observed value before `window_end` |
 | `_first` | First observed value in the window |
 | `_delta` | Last value minus first value |
-| `_slope` | Change per hour from first to last value |
-| `_time_since_last` | Hours between the last measurement and `window_end` |
-| `_missing_flag` | 1 if the vital sign is missing in the window, otherwise 0 |
+| `_slope` | Change per hour from first to last value; missing if fewer than two values or zero time gap |
+| `_time_since_last` | Hours between last measurement and `window_end` |
+| `_missing_flag` | 1 if this vital sign is missing in the window; otherwise 0 |
 
-### 5.5 Baseline, recent, and contrast features
+Example columns:
+
+```text
+HR_mean
+HR_min
+HR_max
+HR_std
+HR_count
+HR_last
+HR_first
+HR_delta
+HR_slope
+HR_time_since_last
+HR_missing_flag
+```
+
+### 5.5 Baseline/recent split inside each observation window
 
 Each observation window is split into two halves:
 
@@ -190,17 +317,27 @@ baseline = earlier half of the observation window
 recent   = later half of the observation window
 ```
 
-The same vital-sign summaries are calculated for both halves using prefixes:
+The same full-window summaries are calculated for both halves using prefixes:
 
-- `baseline_`
-- `recent_`
+```text
+baseline_
+recent_
+```
 
-The notebook then creates recent-minus-baseline contrast features for:
+Example:
 
-- `mean`
-- `min`
-- `max`
-- `count`
+```text
+baseline_HR_mean
+recent_HR_mean
+```
+
+### 5.6 Recent-minus-baseline contrast features
+
+The notebook creates recent-minus-baseline contrast features for these metrics:
+
+```text
+mean, min, max, count
+```
 
 Example:
 
@@ -208,25 +345,33 @@ Example:
 recent_minus_baseline_HR_mean
 ```
 
-### 5.6 Fixed short-recent features
+These features describe whether the recent half of the window differs from the earlier half.
 
-The notebook also creates short recent features immediately before `window_end`:
+### 5.7 Fixed short-recent features
 
-- last 60 minutes: `last60min_`
-- last 30 minutes: `last30min_`
+The notebook also creates short-recent summaries immediately before `window_end`:
+
+| Prefix | Time range |
+|---|---|
+| `last60min_` | Last 60 minutes before `window_end` |
+| `last30min_` | Last 30 minutes before `window_end` |
 
 For each vital sign, these short-recent summaries include:
 
-- `mean`
-- `min`
-- `max`
-- `std`
-- `count`
-- `last`
+```text
+mean, min, max, std, count, last
+```
 
-### 5.7 Vital availability features
+Example:
 
-The notebook adds simple missingness/availability features:
+```text
+last60min_HR_last
+last30min_RR_max
+```
+
+### 5.8 Vital availability features
+
+The notebook adds simple missingness and availability features:
 
 | Feature | Meaning |
 |---|---|
@@ -240,104 +385,129 @@ The notebook adds simple missingness/availability features:
 
 ## 6. Sliding Window Design and Label Construction
 
-The notebook builds non-sequential window-level datasets.
+This section explains both window generation and target labels, because the labels only make sense after the window timeline is clear.
 
 ### 6.1 Window settings
 
-Observation windows:
+The notebook builds non-sequential datasets using:
 
-```python
-m_hours = [4, 6, 12, 24]
-```
+| Setting | Values |
+|---|---|
+| Observation windows `m_hours` | 4, 6, 12, 24 |
+| Prediction horizons `h_hours` | 4, 6, 12 |
+| Sliding step | 1 hour |
 
-Prediction horizons:
-
-```python
-h_hours = [4, 6, 12]
-```
-
-Sliding step:
-
-```python
-1 hour
-```
-
-For each case, windows are generated from `W36 Start DT_dt` until `Movement End DT_dt`.
-
-A window has:
+For one case:
 
 ```text
-window_start
-window_end = window_start + m_hours
-horizon_end = window_end + h_hours
+window_start = W36 Start DT + k hours
+window_end   = window_start + m_hours
+horizon_end  = window_end + h_hours
 ```
 
-### 6.2 Window timeline
+A candidate window is first created only if:
+
+```text
+window_end <= Movement End DT
+```
+
+It is saved into a final labelled dataset only if the full future horizon is observable:
+
+```text
+horizon_end <= Movement End DT
+```
+
+### 6.2 Timeline visualization
 
 ```mermaid
 flowchart LR
     A[W36 Start] --> B[window_start]
-    B --> C[Observation window<br/>use vitals only here]
+    B --> C[Observation window<br/>features are built here]
     C --> D[window_end<br/>prediction time]
-    D --> E[Prediction horizon<br/>label is checked here]
+    D --> E[Prediction horizon<br/>labels are checked here]
     E --> F[horizon_end]
     F --> G[Movement End]
 
-    C -. features .-> D
-    E -. outcome label .-> F
+    C -. only past data used .-> D
+    E -. future event checked .-> F
 ```
 
 ### 6.3 Positive, negative, and discarded windows
 
-For an event-specific target such as `y_o2`, the label is defined using the event time and the prediction horizon.
+For an event-specific target such as `y_o2`, the notebook applies this rule:
 
 ```mermaid
 flowchart TD
     A[Candidate window] --> B{Is horizon_end <= Movement End DT?}
-    B -- No --> X[Discard window<br/>full horizon is not observable]
-    B -- Yes --> C{Did the same event already happen before window_end?}
-    C -- Yes --> Y[Ineligible for this target<br/>eligible_y_event = 0<br/>y_event = NaN]
-    C -- No --> D{Does event happen in<br/>[window_end, horizon_end)?}
+    B -- No --> X[Discarded<br/>future horizon not fully observable]
+    B -- Yes --> C{Did the same event happen before window_end?}
+    C -- Yes --> Y[Ineligible for this event target<br/>eligible_y_event = 0<br/>y_event = NaN]
+    C -- No --> D{Does this event happen in<br/>[window_end, horizon_end)?}
     D -- Yes --> P[Positive window<br/>eligible_y_event = 1<br/>y_event = 1]
     D -- No --> N[Negative window<br/>eligible_y_event = 1<br/>y_event = 0]
 ```
 
-The event is considered positive only if:
+The event is counted as positive only if:
 
 ```python
 event_time >= window_end
 event_time < horizon_end
 ```
 
-The full prediction horizon must be observable:
+The lower bound is inclusive and the upper bound is exclusive.
 
-```python
-horizon_end <= Movement End DT
-```
+### 6.4 Why some windows are ineligible instead of negative
 
-Late-stay windows that fail this rule are removed.
+If an event already happened before `window_end`, the model should not be trained to predict that same event again.
 
-### 6.4 Cascade label design
-
-The v8 dataset supports cascade modelling. This means windows after one deterioration event are not automatically removed, because a previous event may be valid clinical history for predicting a later event.
-
-For example, if O2 increase happened before `window_end`, then:
+Example:
 
 ```text
-prior_o2 = 1
-time_since_prior_o2_hours = hours since O2 increase
+O2 increase happened before window_end
 ```
 
-This is valid because it is known at prediction time.
-
-However, the same event is not predicted again after it has already happened. For example, if O2 increase happened before `window_end`:
+Then for the O2 target:
 
 ```text
 eligible_y_o2 = 0
 y_o2 = NaN
 ```
 
-### 6.5 Target columns
+This does not mean the window is useless. The same row may still be eligible for other event targets, such as MET activation or HD/ICU transfer.
+
+### 6.5 Cascade modelling design
+
+The v8 dataset is cascade-capable.
+
+Earlier deterioration events are kept as valid history if they happened before `window_end`. For example:
+
+```text
+prior_o2 = 1
+time_since_prior_o2_hours = hours since previous O2 increase
+```
+
+These features are leakage-safe because they are known at prediction time.
+
+Created prior-event features include:
+
+```text
+prior_hd_icu
+prior_o2
+prior_iv
+prior_met
+prior_death
+time_since_prior_hd_icu_hours
+time_since_prior_o2_hours
+time_since_prior_iv_hours
+time_since_prior_met_hours
+time_since_prior_death_hours
+prior_event_count
+any_prior_deterioration_flag
+time_since_first_prior_event_hours
+time_since_most_recent_prior_event_hours
+```
+
+### 6.6 Target columns
 
 The final window datasets contain six target columns:
 
@@ -345,7 +515,7 @@ The final window datasets contain six target columns:
 |---|---|
 | `y_any` | Any new not-yet-occurred deterioration event inside the prediction horizon |
 | `y_hd_icu` | New HD/ICU transfer inside the prediction horizon |
-| `y_o2` | New O2 increase inside the prediction horizon |
+| `y_o2` | New confirmed O2 increase inside the prediction horizon |
 | `y_iv` | New IV increase inside the prediction horizon |
 | `y_met` | New MET activation inside the prediction horizon |
 | `y_death` | New death event inside the prediction horizon |
@@ -361,7 +531,18 @@ eligible_y_met
 eligible_y_death
 ```
 
-These eligibility columns are used for filtering during model training, not as prediction features.
+During modelling, eligibility columns should be used for filtering valid rows for the selected target. They should not be used as model predictors.
+
+### 6.7 Difference between case-level labels and window-level labels
+
+| Concept | Meaning | Example |
+|---|---|---|
+| Case-level positive | The case ever had an event | Patient eventually had MET activation |
+| Timed positive case | The case had an event with a usable timestamp | MET activation time is known |
+| Positive window | The event occurs inside this row's prediction horizon | MET occurs between `window_end` and `horizon_end` |
+| Eligible window | The selected event had not already happened before `window_end` | MET had not happened yet |
+
+This distinction matters because a positive case can generate many negative windows before the positive window.
 
 ---
 
@@ -369,22 +550,26 @@ These eligibility columns are used for filtering during model training, not as p
 
 A direct way to understand the final modelling features is to group them by how they are created.
 
-| Feature group | Examples | Interpretation |
-|---|---|---|
-| Metadata | `case_no_deid_clean`, `data_split`, `m_hours`, `h_hours`, `window_start`, `window_end`, `horizon_end` | Identifies the case and window; not used as ordinary clinical predictors |
-| Targets and eligibility | `y_any`, `y_o2`, `eligible_y_o2` | Window-level labels and target eligibility indicators |
-| Demographics / patient baseline | `Age`, `Gender`, `Race`, `Admit Type Description`, `data_batch`, `hours_since_w36_start` | Case-level and time-since-W36 information known at prediction time |
-| Full-window vital features | `HR_mean`, `RR_max`, `SpO2_slope`, `temperature_time_since_last` | Vital-sign summaries over the full observation window |
-| Baseline/recent vital features | `baseline_HR_mean`, `recent_HR_mean` | Earlier-half and later-half window summaries |
-| Contrast features | `recent_minus_baseline_HR_mean` | Difference between recent and baseline status |
-| Short-recent vital features | `last60min_HR_last`, `last30min_RR_max` | Last 60-minute and last 30-minute summaries before prediction time |
-| Vital availability features | `available_vital_type_count`, `all_core_vitals_available_flag` | Missingness and measurement availability signals |
-| Secondary diagnosis features | `secondary_dx_respiratory`, `secondary_dx_cardiac`, `secondary_diagnosis_count` | Grouped secondary-diagnosis risk markers |
-| Prior-event cascade features | `prior_o2`, `time_since_prior_o2_hours`, `prior_event_count` | Deterioration history already known before prediction time |
+| Feature group | Examples | Used as predictors? | Interpretation |
+|---|---|---:|---|
+| Metadata | `case_no_deid_clean`, `data_split`, `m_hours`, `h_hours`, `window_start`, `window_end`, `horizon_end` | No | Identifies case, split, and window |
+| Targets and eligibility | `y_any`, `y_o2`, `eligible_y_o2` | No | Labels and target-specific filtering indicators |
+| Demographics / patient baseline | `Age`, `Gender`, `Race`, `Admit Type Description`, `data_batch`, `hours_since_w36_start` | Yes | Case-level and prediction-time context |
+| Full-window vital features | `HR_mean`, `RR_max`, `SpO2_slope`, `temperature_time_since_last` | Yes | Vital-sign status across the whole observation window |
+| Baseline/recent vital features | `baseline_HR_mean`, `recent_HR_mean` | Yes | Earlier-half and later-half summaries |
+| Contrast features | `recent_minus_baseline_HR_mean` | Yes | Recent status minus earlier status |
+| Short-recent vital features | `last60min_HR_last`, `last30min_RR_max` | Optional feature-set predictors | Very recent vital-sign status before prediction time |
+| Vital availability features | `available_vital_type_count`, `all_core_vitals_available_flag` | Yes | Missingness and measurement availability signals |
+| Secondary diagnosis features | `secondary_dx_respiratory`, `secondary_dx_cardiac`, `secondary_diagnosis_count` | Optional feature-set predictors | Grouped secondary-diagnosis risk markers |
+| Prior-event cascade features | `prior_o2`, `time_since_prior_o2_hours`, `prior_event_count` | Yes for cascade modelling | Deterioration history already known before prediction time |
 
-The notebook also defines leakage-safe feature-set helper functions. The main comparison groups are:
+### 7.1 Feature-set helper functions
 
-| Feature set name | Included feature groups |
+The notebook defines helper functions for leakage-safe feature selection. These functions are intended to be used after loading one generated train/validation/test CSV.
+
+Main cascade feature sets:
+
+| Feature set name | Included groups |
 |---|---|
 | `baseline_patient_vital` | Patient baseline + vital-sign features |
 | `cascade_patient_vital_history` | Patient baseline + vital-sign features + prior-event history |
@@ -395,14 +580,39 @@ The notebook also defines leakage-safe feature-set helper functions. The main co
 | `cascade_final30_dx_last30` | Cascade features + secondary diagnosis + last-30-minute features |
 | `cascade_full_optional_dx_last60_last30` | Cascade features + secondary diagnosis + both short-recent feature sets |
 
-For first-deterioration modelling, the notebook keeps only windows where:
+Use:
+
+```python
+X, y, feature_cols = prepare_model_data(
+    df=train_df,
+    target_col="y_o2",
+    feature_set_name="cascade_final60_dx_last60"
+)
+```
+
+This helper automatically removes rows where `eligible_y_o2 != 1` and removes rows with missing `y_o2`.
+
+### 7.2 First-deterioration subset
+
+The same v8 dataset can also be used for first-deterioration prediction.
+
+First-deterioration windows are rows where no deterioration event happened before `window_end`:
 
 ```python
 prior_event_count == 0
 any_prior_deterioration_flag == 0
 ```
 
-This subset answers a different question: before any deterioration has happened, can the model predict whether deterioration will happen in the next `h` hours?
+This subset answers a narrower question:
+
+> Before any deterioration has happened, can the model predict whether deterioration will occur in the next `h` hours?
+
+The notebook provides separate helper functions for this setting:
+
+```python
+filter_first_deterioration_windows(df)
+prepare_first_deterioration_model_data(df, target_col, feature_set_name)
+```
 
 ---
 
@@ -410,7 +620,7 @@ This subset answers a different question: before any deterioration has happened,
 
 The split is performed at case level, not window level.
 
-This prevents windows from the same patient/case appearing in both training and testing data.
+This prevents windows from the same case appearing in both training and testing data.
 
 The split ratio is:
 
@@ -432,7 +642,7 @@ The notebook uses:
 random_state = 42
 ```
 
-After the case-level split is assigned, each generated window inherits the split of its parent case.
+After case-level split assignment, every generated window inherits the split of its parent case.
 
 ---
 
@@ -457,12 +667,10 @@ m{m}_h{h}/
 File pattern:
 
 ```text
-train_m{m}_h{h}.csv
-validation_m{m}_h{h}.csv
-test_m{m}_h{h}.csv
+{split}_m{m}_h{h}.csv
 ```
 
-Example:
+Examples:
 
 ```text
 m6_h12/train_m6_h12.csv
@@ -470,7 +678,7 @@ m6_h12/validation_m6_h12.csv
 m6_h12/test_m6_h12.csv
 ```
 
-Because `m = [4, 6, 12, 24]` and `h = [4, 6, 12]`, the notebook can generate 12 dataset combinations.
+Because `m = [4, 6, 12, 24]` and `h = [4, 6, 12]`, the notebook can generate 12 dataset combinations. Each combination has three split files.
 
 ### 9.2 Internal feature bases
 
@@ -480,32 +688,58 @@ Reusable feature bases are saved under:
 feature_bases_internal/
 ```
 
-These files contain intermediate feature rows before prediction-horizon labels are added.
+File pattern:
 
-They may include internal event-time columns and `Movement End DT`, so they should not be used directly for final model training.
+```text
+{split}_feature_base_m{m}.csv
+```
 
-### 9.3 Summary files
+These files are created before prediction-horizon labels are added. They may include internal event-time columns and `Movement End DT`, so they should not be used directly for final model training.
 
-The notebook also saves:
+### 9.3 Summary and checking files
 
 | File | Purpose |
 |---|---|
-| `case_split_summary.csv` | Case-level split size and positive case counts |
-| `dataset_generation_summary.csv` | Row counts, column counts, case counts, and positive-window summaries for generated datasets |
-| `missingness_summary.csv` | Missingness summary for generated datasets |
+| `case_split_summary.csv` | Case-level split size, case-level positive counts, and timed-positive case counts |
+| `dataset_generation_summary.csv` | Row counts, column counts, case counts, eligible-window counts, positive-window counts, and positive-case counts for generated datasets |
+| `missingness_summary.csv` | Missingness rate of generated missing-flag features |
 | `horizon_censoring_summary.csv` | Number and rate of windows removed because the full prediction horizon was not observable |
+| `secondary_diagnosis_grouped_features.csv` | Case-level grouped secondary diagnosis dummy features |
+| `secondary_diagnosis_group_summary_with_outcome_rates.csv` | Diagnosis-group summary with case counts and outcome rates |
+| `secondary_diagnosis_frequency.csv` | Frequency of cleaned secondary diagnosis terms |
 
 ---
 
-## 10. Known Limitations and Future Improvements
+## 10. How to Use the Final CSVs for Modelling
+
+A typical modelling workflow is:
+
+1. Choose one `m_hours` and one `h_hours` dataset folder, such as `m6_h12`.
+2. Load the corresponding train, validation, and test CSV files.
+3. Choose one target, such as `y_any` or `y_o2`.
+4. Filter to eligible rows for that target, or use `prepare_model_data(...)` from the notebook.
+5. Select one feature set, such as `baseline_patient_vital` or `cascade_final60_dx_last60`.
+6. Train and evaluate the model.
+
+Important modelling reminders:
+
+- Do not use target columns as predictors.
+- Do not use eligibility columns as predictors.
+- Do not use metadata columns as ordinary clinical predictors.
+- Use the matching `eligible_y_*` column when training event-specific models.
+- For first-deterioration modelling, filter to rows with no prior deterioration first.
+
+---
+
+## 11. Known Limitations and Future Improvements
 
 1. **Composite and event-specific outcomes may behave differently**
 
-   `y_any` is useful for general deterioration prediction, but HD/ICU transfer, O2 increase, IV increase, MET activation, and death may have different clinical pathways. Event-specific models should still be compared.
+   `y_any` is useful for general deterioration prediction, but HD/ICU transfer, O2 increase, IV increase, MET activation, and death may follow different clinical pathways. Event-specific models should still be compared.
 
 2. **Charted and sensor vital signs are merged into one clinical stream**
 
-   This improves interpretability, but charted and sensor measurements may differ in frequency, noise, and clinical meaning. Later versions may compare merged versus source-separated vital streams.
+   This improves interpretability, but charted and sensor measurements may differ in frequency, noise level, and clinical meaning. Later versions may compare merged versus source-separated vital streams.
 
 3. **Secondary diagnosis grouping is keyword-based**
 
@@ -513,15 +747,15 @@ The notebook also saves:
 
 ---
 
-## 11. Reproducibility Notes
+## 12. Reproducibility Notes
 
-The main dataset-building notebook is:
+Main dataset-building notebook:
 
 ```text
 Dataset_preparation_modified_v8_final_v1_fixed.ipynb
 ```
 
-Important implementation choices:
+Key implementation choices:
 
 - Window step is 1 hour.
 - Observation windows are 4, 6, 12, and 24 hours.
@@ -530,4 +764,23 @@ Important implementation choices:
 - Primary diagnosis is excluded from model features.
 - Secondary diagnosis is grouped into clinically meaningful dummy variables.
 - Internal event timestamps are used only for label construction and are removed before final CSV saving.
-- Eligibility columns should be used to filter valid rows for each target, not as model predictors.
+- Eligibility columns are used for target-specific filtering, not as model predictors.
+- Feature bases are saved for efficiency, but final modelling should use the labelled split CSVs.
+
+---
+
+## 13. Reader Confusion Checklist Used to Improve This README
+
+The following questions were used to review and clarify the document from the perspective of a new reader:
+
+| Confusion question | Clarification added |
+|---|---|
+| What exactly is one row in the final dataset? | Added Quick Orientation section explaining one row = one case-window |
+| Are the notebook inputs raw files or prepared merged files? | Separated original raw data structure from files directly loaded by v8 |
+| What is the difference between case-level positive and window-level positive? | Added Section 6.7 |
+| Why are some target values `NaN`? | Explained target eligibility and already-happened events |
+| When is a window discarded? | Clarified full-horizon observability rule and added flowchart |
+| Are prior events leakage? | Explained cascade design and why prior events before `window_end` are valid |
+| Which columns should not be used as predictors? | Added predictor-use column in feature group table and modelling reminders |
+| What should be used for first-deterioration modelling? | Added first-deterioration subset rules and helper functions |
+| What files are safe for modelling? | Distinguished final labelled CSVs from internal feature bases |
