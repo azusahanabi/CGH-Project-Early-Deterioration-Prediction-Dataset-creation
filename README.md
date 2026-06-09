@@ -6,19 +6,19 @@ It is written for readers who have not seen the project before. It explains the 
 
 ---
 
-## 0. Quick Orientation
+## 1. Quick Orientation
 
-### 0.1 One-sentence project objective
+### 1.1 One-sentence project objective
 
 This dataset is built to predict whether a CGH W36 inpatient will experience a new clinical deterioration event within the next few hours, using only information available before each prediction time.
 
-### 0.2 What is one row in the final dataset?
+### 1.2 What is one row in the final dataset?
 
 One row is **one prediction window for one hospital case**.
 
 It is not one patient, one admission, or one vital-sign measurement. A single case can produce many rows because the notebook creates a new prediction window every 1 hour during the W36 monitoring episode.
 
-### 0.3 The core prediction idea
+### 1.3 The core prediction idea
 
 At each `window_end`, the model looks backward to build features and looks forward to assign labels.
 
@@ -29,7 +29,7 @@ At each `window_end`, the model looks backward to build features and looks forwa
 
 The model should never use future information as predictors.
 
-### 0.4 Key time terms
+### 1.4 Key time terms
 
 | Term | Meaning |
 |---|---|
@@ -43,9 +43,9 @@ The model should never use future information as predictors.
 
 ---
 
-## 1. Data Sources
+## 2. Data Sources
 
-### 1.1 Original raw data structure
+### 2.1 Original raw data structure
 
 The project combines two data batches:
 
@@ -62,7 +62,7 @@ Each batch originally contains five source datasets.
 | `eHINTS_vitalSigns_ano` | Manually charted vital signs |
 | `Respiree_vital_sign` | Respiree sensor vital-sign time series |
 
-### 1.2 Files directly loaded by the v8 notebook
+### 2.2 Files directly loaded by the v8 notebook
 
 The v8 notebook does **not** directly reload the ten raw files. It starts from prepared merged CSV files stored under:
 
@@ -78,7 +78,7 @@ The v8 notebook does **not** directly reload the ten raw files. It starts from p
 | `sensor_timeseries_all_240920_240822.csv` | Respiree sensor vital-sign time series |
 | `cohort_summary_all_240920_240822.csv` | Cohort-checking summary file loaded for audit/reference |
 
-### 1.3 Data flow overview
+### 2.3 Data flow overview
 
 ```mermaid
 flowchart LR
@@ -90,7 +90,7 @@ flowchart LR
 
 ---
 
-## 2. Cohort Selection Rule
+## 3. Cohort Selection Rule
 
 The modelling cohort keeps only cases that appear in all required project data sources.
 
@@ -115,9 +115,9 @@ Therefore, each final case has outcome information, diagnosis information, chart
 
 ---
 
-## 3. Data Cleaning Steps
+## 4. Data Cleaning Steps
 
-### 3.1 Standardize case IDs
+### 4.1 Standardize case IDs
 
 All loaded tables receive a cleaned `case_no_deid_clean` column.
 
@@ -129,7 +129,7 @@ The cleaning removes extra spaces and fixes IDs that may be read as decimal-look
 
 This reduces failed joins caused by formatting differences across files.
 
-### 3.2 Convert datetime columns
+### 4.2 Convert datetime columns
 
 Important case-level, charted-vital, and sensor-vital time columns are converted into datetime format. Invalid datetime values are coerced to missing.
 
@@ -145,7 +145,7 @@ Important case-level, charted-vital, and sensor-vital time columns are converted
 | `created_datetime_dt` | Charted-vital measurement time |
 | `sensor_datetime_dt` | Sensor-vital measurement time |
 
-### 3.3 Define case-level outcome flags
+### 4.3 Define case-level outcome flags
 
 The notebook first defines deterioration at case level. These flags answer: **did this case ever have this event?**
 
@@ -158,7 +158,7 @@ The notebook first defines deterioration at case level. These flags answer: **di
 | `label_death` | Death 1M, Death 3M, or non-missing death date |
 | `label_any_deterioration` | Any of the five event labels is positive |
 
-### 3.4 Define usable event timestamps
+### 4.4 Define usable event timestamps
 
 Window-level labels require event timestamps. A case may be case-level positive but still lack a usable event time.
 
@@ -174,39 +174,161 @@ The notebook creates these event-time columns:
 
 For O2 increase, if the case is not confirmed as O2 increase, its O2 timestamp is set to missing for labelling. This avoids false positive O2 windows caused by non-confirmed timestamps.
 
-### 3.5 Use secondary diagnosis only
+### 4.5 Keep diagnosis feature handling separate
 
-The v8 notebook uses `secondary_diagnosis_list` from `diagnosis_summary_all_240920_240822.csv`.
+Secondary-diagnosis processing is important enough to be documented as a separate section. In short, the notebook uses `secondary_diagnosis_list`, excludes primary diagnosis, converts raw diagnosis text into grouped dummy variables, and merges those grouped features back into the case-level cohort.
 
-Primary diagnosis is excluded from model features because it may contain information finalized after W36 admission or discharge.
+See **Section 5. Secondary Diagnosis Extraction and Categorization** for the full logic.
 
-Secondary diagnoses are transformed into grouped dummy variables. A case can belong to multiple diagnosis groups.
-
-Examples include:
-
-```text
-secondary_dx_infection_sepsis
-secondary_dx_pneumonia
-secondary_dx_respiratory
-secondary_dx_cardiac
-secondary_dx_renal_any
-secondary_dx_acute_kidney_failure
-secondary_dx_ckd_stage_3_5_or_dialysis
-secondary_dx_diabetes_complication
-secondary_dx_malignancy
-secondary_dx_neuro_delirium_stroke
-secondary_diagnosis_count
-```
-
-The exact keyword rules are in notebook Cell 8A.
-
-### 3.6 Remove internal labelling columns before final saving
+### 4.6 Remove internal labelling columns before final saving
 
 Event-time columns and `Movement End DT` are needed for labelling and censoring. They are removed from the final modelling CSVs after labels are created.
 
 ---
 
-## 4. Vital Sign Processing
+
+## 5. Secondary Diagnosis Extraction and Categorization
+
+This section documents how the notebook turns secondary-diagnosis text into usable model features.
+
+The goal is not to predict from hundreds of rare diagnosis phrases. Instead, the notebook extracts clinically meaningful risk markers from secondary diagnoses and stores them as compact case-level dummy variables.
+
+### 5.1 Why secondary diagnosis is used
+
+The notebook uses **secondary diagnosis only**.
+
+Project background suggests that secondary diagnoses were mostly available before W36 ward admission, so they can represent baseline comorbidity and risk burden. Primary diagnosis is intentionally excluded because it may be finalized later, including after W36 admission or after discharge, which could introduce leakage.
+
+In plain words:
+
+```text
+Use secondary diagnosis as baseline risk context.
+Do not use primary diagnosis as a main predictor in this version.
+```
+
+### 5.2 Input column
+
+The diagnosis input comes from:
+
+```text
+diagnosis_summary_all_240920_240822.csv
+```
+
+The notebook uses these two columns:
+
+| Column | Role |
+|---|---|
+| `case_no_deid_clean` | Case identifier |
+| `secondary_diagnosis_list` | Pipe-separated secondary diagnosis text |
+
+A typical secondary-diagnosis field may contain multiple diagnoses separated by `|`.
+
+```text
+Diagnosis A | Diagnosis B | Diagnosis C
+```
+
+### 5.3 Extraction steps
+
+The extraction process is:
+
+1. Keep `case_no_deid_clean` and `secondary_diagnosis_list`.
+2. Standardize the case ID.
+3. Split `secondary_diagnosis_list` by `|`.
+4. Explode the list so that each row contains one case and one diagnosis phrase.
+5. Strip extra spaces.
+6. Remove empty or placeholder values such as empty strings, `nan`, `None`, and `**********`.
+7. Remove duplicate diagnosis phrases for the same case.
+8. Normalize diagnosis text by lowercasing it and removing punctuation.
+
+The normalized text is used only for keyword matching. The original diagnosis description is still used in the frequency-checking file.
+
+### 5.4 Categorization logic
+
+The notebook uses keyword-based grouping. Each diagnosis phrase is checked against a dictionary of clinically meaningful keyword groups.
+
+For each group:
+
+```text
+If any keyword from the group appears in the cleaned diagnosis text,
+set the group flag to 1 for that diagnosis row.
+```
+
+Then the notebook aggregates to case level:
+
+```text
+If a case has at least one diagnosis phrase matching the group,
+set the case-level group flag to 1.
+```
+
+A case can belong to multiple secondary-diagnosis groups. For example, the same case can be flagged as both `secondary_dx_respiratory = 1` and `secondary_dx_cardiac = 1`.
+
+### 5.5 Diagnosis groups created
+
+The grouped secondary-diagnosis features include these categories:
+
+| Feature group | Main clinical meaning |
+|---|---|
+| `secondary_dx_infection_sepsis` | Infection, sepsis, bacteraemia, UTI-related terms |
+| `secondary_dx_pneumonia` | Pneumonia and bronchopneumonia |
+| `secondary_dx_respiratory` | Respiratory failure, COPD, asthma, hypoxia, pulmonary oedema, pleural effusion, and related terms |
+| `secondary_dx_cardiac` | Heart failure, ischemic heart disease, myocardial infarction, arrhythmia, coronary disease, and related terms |
+| `secondary_dx_thrombosis_embolism` | Pulmonary embolism, thrombosis, DVT |
+| `secondary_dx_renal_any` | Any renal, kidney, nephropathy, or dialysis-related term |
+| `secondary_dx_acute_kidney_failure` | AKI, acute kidney injury, acute renal failure |
+| `secondary_dx_ckd_stage_3_5_or_dialysis` | CKD stage 3–5 or dialysis |
+| `secondary_dx_diabetes_complication` | Diabetes with complications or poor control |
+| `secondary_dx_hypertension` | Hypertension-related terms |
+| `secondary_dx_electrolyte_acid_base_volume` | Electrolyte, acid-base, dehydration, volume depletion, or fluid overload terms |
+| `secondary_dx_anemia_bleeding_coagulation` | Anaemia, bleeding, thrombocytopenia, pancytopenia, neutropenia, and coagulation terms |
+| `secondary_dx_malignancy` | Cancer, carcinoma, neoplasm, lymphoma, leukaemia, tumour/tumor |
+| `secondary_dx_metastatic_cancer` | Metastatic or secondary malignant disease |
+| `secondary_dx_neuro_delirium_stroke` | Delirium, dementia, stroke, seizure, Parkinson-related, neurological terms |
+| `secondary_dx_liver_cirrhosis_failure` | Cirrhosis, hepatic failure, liver failure, portal hypertension |
+| `secondary_dx_gi_acute` | GI haemorrhage, obstruction, perforation, peritonitis, ileus, melena, haematemesis |
+| `secondary_dx_frailty_pressure_ulcer_dysphagia_fall` | Frailty, pressure ulcer, dysphagia, fall, malnutrition, cachexia, walking difficulty |
+| `secondary_dx_hypotension_shock` | Hypotension and shock-related terms |
+
+The exact keyword list is defined in notebook Cell 8A.
+
+### 5.6 Case-level diagnosis features
+
+After grouping, the notebook creates one row per case with these features:
+
+| Feature | Meaning |
+|---|---|
+| `secondary_diagnosis_count` | Number of unique cleaned secondary-diagnosis phrases for the case |
+| `secondary_dx_*` | One dummy variable per diagnosis group |
+| `secondary_dx_severe_group_count` | Number of secondary-diagnosis groups flagged for the case |
+
+If a full-cohort case has no usable secondary diagnosis after cleaning, the notebook still keeps the case and fills diagnosis features with 0. This avoids silently dropping cases during diagnosis merging.
+
+### 5.7 Diagnosis checking outputs
+
+The notebook saves three files to help audit the diagnosis processing:
+
+| File | Purpose |
+|---|---|
+| `secondary_diagnosis_grouped_features.csv` | Case-level grouped diagnosis dummy features |
+| `secondary_diagnosis_group_summary_with_outcome_rates.csv` | Diagnosis-group prevalence and outcome rates |
+| `secondary_diagnosis_frequency.csv` | Frequency of cleaned secondary-diagnosis descriptions |
+
+These files are useful for checking whether the groups are too rare, too broad, or unexpectedly associated with outcomes.
+
+### 5.8 Rerun safety
+
+Before merging grouped diagnosis features back into `full_cohort`, the notebook removes old secondary-diagnosis columns if they already exist.
+
+This prevents repeated Colab runs from creating duplicated columns such as:
+
+```text
+secondary_diagnosis_count_x
+secondary_diagnosis_count_y
+```
+
+This step also avoids downstream errors where the clean column name no longer exists.
+
+
+## 6. Vital Sign Processing
 
 The notebook creates one unified long-format vital-sign table.
 
@@ -214,7 +336,7 @@ The notebook creates one unified long-format vital-sign table.
 case_no_deid_clean | vital_time | vital_name | vital_value
 ```
 
-### 4.1 Charted vital signs
+### 6.1 Charted vital signs
 
 Charted vital signs are filtered to full-cohort cases, assigned `vital_time`, and converted into long format if needed.
 
@@ -231,7 +353,7 @@ charted_HR -> HR
 charted_charted_HR -> HR
 ```
 
-### 4.2 Sensor vital signs
+### 6.2 Sensor vital signs
 
 Sensor records are retained only when:
 
@@ -249,7 +371,7 @@ Sensor vital types include:
 RR, HR, SpO2, skin_temperature, body_temperature
 ```
 
-### 4.3 Unified vital-sign names
+### 6.3 Unified vital-sign names
 
 Clinically comparable charted and sensor variables are merged into one stream.
 
@@ -265,7 +387,7 @@ Clinically comparable charted and sensor variables are merged into one stream.
 
 `skin_temperature` is kept separate because it is not the same clinical variable as body temperature.
 
-### 4.4 Full-window vital features
+### 6.4 Full-window vital features
 
 For each vital sign inside each observation window, the notebook creates these summaries.
 
@@ -299,30 +421,66 @@ HR_time_since_last
 HR_missing_flag
 ```
 
-### 4.5 Baseline/recent split inside each observation window
+### 6.5 Baseline/recent split inside each observation window
 
-Each observation window is split into two halves.
+Each observation window is split into two equal parts.
 
 ```text
 baseline = earlier half of the observation window
 recent   = later half of the observation window
 ```
 
-The same full-window summaries are calculated for both halves using prefixes:
+For example, if `m_hours = 12`:
+
+```text
+baseline = first 6 hours of the observation window
+recent   = last 6 hours before window_end
+```
+
+```mermaid
+flowchart LR
+    A["window_start"] --> B["Baseline half"]
+    B --> C["split_time"]
+    C --> D["Recent half"]
+    D --> E["window_end"]
+```
+
+The same vital-sign summaries are calculated for both halves using prefixes:
 
 ```text
 baseline_
 recent_
 ```
 
-Example:
+Example columns:
 
 ```text
 baseline_HR_mean
 recent_HR_mean
+baseline_RR_max
+recent_RR_max
 ```
 
-### 4.6 Recent-minus-baseline contrast features
+### 6.6 Why baseline + recent features are used
+
+Full-window features summarize the whole observation window, but they can hide short-term deterioration.
+
+For example, a 12-hour average HR may look acceptable even if HR rose sharply in the last few hours. The baseline/recent split helps the model compare the patient's recent physiology against their own earlier status in the same observation window.
+
+The intention is:
+
+| Feature type | Question answered |
+|---|---|
+| Full-window feature | What was the overall physiological status during the window? |
+| Baseline feature | What was the earlier status in this window? |
+| Recent feature | What was the later status closer to prediction time? |
+| Recent-minus-baseline feature | Did the patient become better, worse, or more frequently measured recently? |
+
+This design is especially useful for deterioration prediction because worsening trends may matter more than absolute values alone.
+
+Important naming note: `baseline_` in columns such as `baseline_HR_mean` means the earlier half of the observation window. It should not be confused with the feature-set name `baseline_patient_vital`, where “baseline” means the basic model feature set without optional diagnosis, prior-event, or short-recent additions.
+
+### 6.7 Recent-minus-baseline contrast features
 
 The notebook creates recent-minus-baseline contrast features for these metrics:
 
@@ -336,11 +494,17 @@ Example:
 recent_minus_baseline_HR_mean
 ```
 
-These features describe whether the recent half of the window differs from the earlier half.
+The interpretation is direct:
 
-### 4.7 Fixed short-recent features
+```text
+recent_minus_baseline_HR_mean = recent_HR_mean - baseline_HR_mean
+```
 
-The notebook also creates short-recent summaries immediately before `window_end`.
+A positive value means the recent half had a higher mean HR than the earlier half. A negative value means the recent half had a lower mean HR. For count features, a positive value means the patient was measured more often recently, which may itself reflect clinical concern or monitoring intensity.
+
+### 6.8 Fixed short-recent features: last 60 minutes and last 30 minutes
+
+The notebook also creates fixed short-recent summaries immediately before `window_end`.
 
 | Prefix | Time range |
 |---|---|
@@ -353,14 +517,35 @@ For each vital sign, these short-recent summaries include:
 mean, min, max, std, count, last
 ```
 
-Example:
+Example columns:
 
 ```text
 last60min_HR_last
+last60min_SpO2_min
 last30min_RR_max
+last30min_temperature_mean
 ```
 
-### 4.8 Vital availability features
+### 6.9 Why both recent 60-minute and recent 30-minute features are used
+
+The 60-minute and 30-minute recent windows are created for comparison, not because one is assumed to be always better.
+
+Their intentions are different:
+
+| Short-recent window | Main intention | Possible weakness |
+|---|---|---|
+| Last 60 minutes | Capture near-term deterioration with slightly more stable measurement coverage | May smooth over very acute changes |
+| Last 30 minutes | Capture very acute changes immediately before prediction time | More likely to be sparse or noisy, especially for charted vitals |
+
+This gives the modelling stage a fair comparison:
+
+```text
+Does the model benefit more from a broader recent signal, or from the most immediate signal?
+```
+
+For sensor variables, 30-minute features may capture acute physiological changes. For manually charted variables, 60-minute features may be more reliable because charted measurements are often less frequent.
+
+### 6.10 Vital availability features
 
 The notebook adds simple missingness and availability features.
 
@@ -374,11 +559,11 @@ The notebook adds simple missingness and availability features.
 
 ---
 
-## 5. Sliding Window Design and Label Construction
+## 7. Sliding Window Design and Label Construction
 
 Labels are explained together with sliding windows because a label only has meaning relative to a specific `window_end` and `horizon_end`.
 
-### 5.1 Window settings
+### 7.1 Window settings
 
 | Setting | Values |
 |---|---|
@@ -406,7 +591,7 @@ It is saved into a final labelled dataset only if the full future horizon is obs
 horizon_end <= Movement End DT
 ```
 
-### 5.2 Timeline visualization
+### 7.2 Timeline visualization
 
 ```mermaid
 flowchart LR
@@ -425,7 +610,7 @@ Labels come from the future prediction horizon.
 The future horizon must be fully observable; otherwise the window is discarded.
 ```
 
-### 5.3 Positive, negative, ineligible, and discarded windows
+### 7.3 Positive, negative, ineligible, and discarded windows
 
 For an event-specific target such as `y_o2`, the notebook applies the following rule.
 
@@ -449,7 +634,7 @@ event_time < horizon_end
 
 The lower bound is inclusive and the upper bound is exclusive.
 
-### 5.4 Four examples of window labels
+### 7.4 Four examples of window labels
 
 | Scenario | Result for that target | Why |
 |---|---|---|
@@ -460,7 +645,7 @@ The lower bound is inclusive and the upper bound is exclusive.
 
 A window can be ineligible for one target but still useful for another target. For example, a row can be ineligible for `y_o2` but eligible for `y_met`.
 
-### 5.5 Target columns
+### 7.5 Target columns
 
 The final window datasets contain six target columns.
 
@@ -486,7 +671,7 @@ eligible_y_death
 
 During modelling, eligibility columns should be used for filtering valid rows for the selected target. They should not be used as model predictors.
 
-### 5.6 Case-level labels versus window-level labels
+### 7.6 Case-level labels versus window-level labels
 
 | Concept | Meaning | Example |
 |---|---|---|
@@ -497,7 +682,7 @@ During modelling, eligibility columns should be used for filtering valid rows fo
 
 This distinction matters because one positive case can generate many negative windows before the positive event window.
 
-### 5.7 Cascade modelling design
+### 7.7 Cascade modelling design
 
 The v8 dataset is cascade-capable.
 
@@ -531,7 +716,7 @@ time_since_most_recent_prior_event_hours
 
 ---
 
-## 6. Feature Groups
+## 8. Feature Groups
 
 A direct way to understand the final modelling features is to group them by how they are created and whether they should be used as predictors.
 
@@ -539,16 +724,31 @@ A direct way to understand the final modelling features is to group them by how 
 |---|---|---:|---|
 | Metadata | `case_no_deid_clean`, `data_split`, `m_hours`, `h_hours`, `window_start`, `window_end`, `horizon_end` | No | Identifies case, split, and window |
 | Targets and eligibility | `y_any`, `y_o2`, `eligible_y_o2` | No | Labels and target-specific filtering indicators |
-| Demographics / patient baseline | `Age`, `Gender`, `Race`, `Admit Type Description`, `data_batch`, `hours_since_w36_start` | Yes | Case-level and prediction-time context |
-| Full-window vital features | `HR_mean`, `RR_max`, `SpO2_slope`, `temperature_time_since_last` | Yes | Vital-sign status across the whole observation window |
-| Baseline/recent vital features | `baseline_HR_mean`, `recent_HR_mean` | Yes | Earlier-half and later-half summaries |
-| Contrast features | `recent_minus_baseline_HR_mean` | Yes | Recent status minus earlier status |
-| Short-recent vital features | `last60min_HR_last`, `last30min_RR_max` | Optional | Very recent vital-sign status before prediction time |
+| Demographics / patient context | `Age`, `Gender`, `Race`, `Admit Type Description`, `data_batch`, `hours_since_w36_start` | Yes | Case-level and prediction-time context |
+| Full-window vital features | `HR_mean`, `RR_max`, `SpO2_slope`, `temperature_time_since_last` | Yes | Overall physiological status across the whole observation window |
+| Baseline/recent vital features | `baseline_HR_mean`, `recent_HR_mean`, `baseline_RR_max`, `recent_RR_max` | Yes | Earlier-half versus later-half status inside the same observation window |
+| Baseline/recent contrast features | `recent_minus_baseline_HR_mean`, `recent_minus_baseline_RR_count` | Yes | Recent change compared with the patient's own earlier status |
+| Short-recent 60-minute features | `last60min_HR_last`, `last60min_SpO2_min` | Optional | Near-term physiology before prediction time |
+| Short-recent 30-minute features | `last30min_RR_max`, `last30min_temperature_mean` | Optional | Very immediate physiology before prediction time |
 | Vital availability features | `available_vital_type_count`, `all_core_vitals_available_flag` | Yes | Missingness and measurement availability signals |
 | Secondary diagnosis features | `secondary_dx_respiratory`, `secondary_dx_cardiac`, `secondary_diagnosis_count` | Optional | Grouped secondary-diagnosis risk markers |
 | Prior-event cascade features | `prior_o2`, `time_since_prior_o2_hours`, `prior_event_count` | Yes for cascade modelling | Deterioration history already known before prediction time |
 
-### 6.1 Feature-set helper functions
+The word “optional” means the notebook creates these features, but the modelling helper allows them to be added or excluded for comparison.
+
+### 8.1 Simple rule for grouping features
+
+A practical rule is:
+
+```text
+Core model features = demographics + full-window vitals + baseline/recent vitals + contrast features + vital availability
+Optional comparison features = secondary diagnosis + last60min + last30min + prior-event history
+Never predictors = metadata + targets + eligibility indicators + internal event timestamps
+```
+
+This rule keeps feature selection understandable while still allowing controlled model comparisons.
+
+### 8.2 Feature-set helper functions
 
 The notebook defines helper functions for leakage-safe feature selection. These functions are intended to be used after loading one generated train/validation/test CSV.
 
@@ -556,14 +756,16 @@ Main cascade feature sets:
 
 | Feature set name | Included groups |
 |---|---|
-| `baseline_patient_vital` | Patient baseline + vital-sign features |
-| `cascade_patient_vital_history` | Patient baseline + vital-sign features + prior-event history |
-| `cascade_plus_secondary_dx` | Cascade features + secondary diagnosis groups |
-| `cascade_plus_last60min` | Cascade features + last-60-minute vital features |
-| `cascade_plus_last30min` | Cascade features + last-30-minute vital features |
-| `cascade_final60_dx_last60` | Cascade features + secondary diagnosis + last-60-minute features |
-| `cascade_final30_dx_last30` | Cascade features + secondary diagnosis + last-30-minute features |
-| `cascade_full_optional_dx_last60_last30` | Cascade features + secondary diagnosis + both short-recent feature sets |
+| `baseline_patient_vital` | Demographics + full-window vitals + baseline/recent vitals + contrast features + vital availability |
+| `cascade_patient_vital_history` | `baseline_patient_vital` + prior-event history |
+| `cascade_plus_secondary_dx` | Cascade patient/vital/history features + secondary diagnosis groups |
+| `cascade_plus_last60min` | Cascade patient/vital/history features + last-60-minute vital features |
+| `cascade_plus_last30min` | Cascade patient/vital/history features + last-30-minute vital features |
+| `cascade_final60_dx_last60` | Cascade patient/vital/history features + secondary diagnosis + last-60-minute features |
+| `cascade_final30_dx_last30` | Cascade patient/vital/history features + secondary diagnosis + last-30-minute features |
+| `cascade_full_optional_dx_last60_last30` | Cascade patient/vital/history features + secondary diagnosis + both short-recent feature sets |
+
+Naming note: `baseline_patient_vital` is the basic comparison feature set. It still contains baseline/recent split features. It is called “baseline” because it excludes optional add-ons such as secondary diagnosis, short-recent features, and prior-event history.
 
 Example use:
 
@@ -577,7 +779,7 @@ X, y, feature_cols = prepare_model_data(
 
 This helper automatically removes rows where `eligible_y_o2 != 1` and removes rows with missing `y_o2`.
 
-### 6.2 First-deterioration subset
+### 8.3 First-deterioration subset
 
 The same v8 dataset can also be used for first-deterioration prediction.
 
@@ -599,9 +801,7 @@ filter_first_deterioration_windows(df)
 prepare_first_deterioration_model_data(df, target_col, feature_set_name)
 ```
 
----
-
-## 7. Train / Validation / Test Split
+## 9. Train / Validation / Test Split
 
 The split is performed at case level, not window level.
 
@@ -631,7 +831,7 @@ After case-level split assignment, every generated window inherits the split of 
 
 ---
 
-## 8. Output Files
+## 10. Output Files
 
 The v8 output folder is:
 
@@ -639,7 +839,7 @@ The v8 output folder is:
 /content/drive/My Drive/merged_240920_240822_prepared/nonsequential_window_dataset_v8_cascade
 ```
 
-### 8.1 Final modelling datasets
+### 10.1 Final modelling datasets
 
 For each observation window `m` and prediction horizon `h`, the notebook saves train, validation, and test CSV files.
 
@@ -665,7 +865,7 @@ m6_h12/test_m6_h12.csv
 
 Because `m = [4, 6, 12, 24]` and `h = [4, 6, 12]`, the notebook can generate 12 dataset combinations. Each combination has three split files.
 
-### 8.2 Internal feature bases
+### 10.2 Internal feature bases
 
 Reusable feature bases are saved under:
 
@@ -681,7 +881,7 @@ File pattern:
 
 These files are created before prediction-horizon labels are added. They may include internal event-time columns and `Movement End DT`, so they should not be used directly for final model training.
 
-### 8.3 Summary and checking files
+### 10.3 Summary and checking files
 
 | File | Purpose |
 |---|---|
@@ -695,7 +895,7 @@ These files are created before prediction-horizon labels are added. They may inc
 
 ---
 
-## 9. How to Use the Final CSVs for Modelling
+## 11. How to Use the Final CSVs for Modelling
 
 A typical modelling workflow is:
 
@@ -716,7 +916,7 @@ Important modelling reminders:
 
 ---
 
-## 10. Known Limitations and Future Improvements
+## 12. Known Limitations and Future Improvements
 
 1. **Composite and event-specific outcomes may behave differently.**
 
@@ -732,7 +932,7 @@ Important modelling reminders:
 
 ---
 
-## 11. Reproducibility Notes
+## 13. Reproducibility Notes
 
 Main dataset-building notebook:
 
@@ -754,7 +954,7 @@ Key implementation choices:
 
 ---
 
-## 12. Reader Confusion Checklist Used to Improve This README
+## 14. Reader Confusion Checklist Used to Improve This README
 
 This section records the review questions used to make the README clearer for a new reader.
 
@@ -762,7 +962,7 @@ This section records the review questions used to make the README clearer for a 
 |---|---|
 | What exactly is one row in the final dataset? | Added Quick Orientation section explaining one row = one case-window |
 | Are the notebook inputs raw files or prepared merged files? | Separated original raw data structure from files directly loaded by v8 |
-| What is the difference between case-level positive and window-level positive? | Added Section 5.6 |
+| What is the difference between case-level positive and window-level positive? | Added Section 7.6 |
 | Why are some target values missing? | Explained target eligibility and already-happened events |
 | When is a window discarded? | Clarified full-horizon observability rule and added Mermaid-safe flowchart |
 | Why does the README show `eligible_y_*` instead of a specific column each time? | Explained that the same rule applies to each selected target |
@@ -770,4 +970,6 @@ This section records the review questions used to make the README clearer for a 
 | Which columns should not be used as predictors? | Added predictor-use column in feature group table and modelling reminders |
 | What should be used for first-deterioration modelling? | Added first-deterioration subset rules and helper functions |
 | What files are safe for modelling? | Distinguished final labelled CSVs from internal feature bases |
-
+| How are secondary diagnoses extracted and categorized? | Added Section 5 with extraction, normalization, grouping, aggregation, and audit outputs |
+| Why use baseline and recent vital features together? | Added Sections 6.5 to 6.7 explaining within-window comparison and contrast features |
+| Why create both last-60-minute and last-30-minute features? | Added Section 6.9 explaining the stability versus immediacy trade-off |
