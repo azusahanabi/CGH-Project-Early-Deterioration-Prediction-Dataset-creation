@@ -1,6 +1,6 @@
 # CGH Inpatient Deterioration Dataset Preparation
 
-This README explains how `Dataset_preparation_modified_v8_final_v1_fixed.ipynb` builds non-sequential modelling datasets for early inpatient deterioration prediction.
+This README explains how `dataset_nonsequential_final.ipynb` builds non-sequential modelling datasets for early inpatient deterioration prediction.
 
 It is written for readers who have not seen the project before. It explains the prediction task, input data, cohort rule, cleaning logic, sliding-window labels, feature groups, split design, and output files.
 
@@ -62,19 +62,19 @@ Each batch originally contains five source datasets.
 | `eHINTS_vitalSigns_ano` | Manually charted vital signs |
 | `Respiree_vital_sign` | Respiree sensor vital-sign time series |
 
-### 2.2 Files directly loaded by the v8 notebook
+### 2.2 Files directly loaded by the final notebook
 
-The v8 notebook does **not** directly reload the ten raw files. It starts from prepared merged CSV files stored under:
+The final notebook does **not** directly reload the ten raw files. It starts from prepared merged CSV files stored under:
 
 ```text
 /content/drive/My Drive/merged_240920_240822_prepared
 ```
 
-| Prepared file | Role in v8 pipeline |
+| Prepared file | Role in final dataset pipeline |
 |---|---|
 | `case_master_all_240920_240822.csv` | Main case-level table with patient information, W36 episode times, source-availability flags, and deterioration outcome fields |
 | `charted_vitals_all_240920_240822.csv` | Manually charted vital-sign records |
-| `diagnosis_summary_all_240920_240822.csv` | Case-level diagnosis summary; v8 uses `secondary_diagnosis_list` |
+| `diagnosis_summary_all_240920_240822.csv` | Case-level diagnosis summary; the final notebook uses `secondary_diagnosis_list` |
 | `sensor_timeseries_all_240920_240822.csv` | Respiree sensor vital-sign time series |
 | `cohort_summary_all_240920_240822.csv` | Cohort-checking summary file loaded for audit/reference |
 
@@ -84,7 +84,7 @@ The v8 notebook does **not** directly reload the ten raw files. It starts from p
 flowchart LR
     A["Raw batch 240822: five source files"] --> C["Prepared merged CSVs"]
     B["Raw batch 240920: five source files"] --> C
-    C --> D["v8 dataset-building notebook"]
+    C --> D["Final dataset-building notebook"]
     D --> E["Window-level modelling CSVs"]
 ```
 
@@ -94,7 +94,7 @@ flowchart LR
 
 The modelling cohort keeps only cases that appear in all required project data sources.
 
-In the v8 notebook, a case is included only when all source-availability flags below are equal to 1:
+In the final notebook, a case is included only when all source-availability flags below are equal to 1:
 
 ```python
 has_ehints_data == 1
@@ -203,7 +203,7 @@ In plain words:
 
 ```text
 Use secondary diagnosis as baseline risk context.
-Do not use primary diagnosis as a main predictor in this version.
+Do not use primary diagnosis as a main predictor in the main modelling dataset.
 ```
 
 ### 5.2 Input column
@@ -684,7 +684,7 @@ This distinction matters because one positive case can generate many negative wi
 
 ### 7.7 Cascade modelling design
 
-The v8 dataset is cascade-capable.
+The final dataset is cascade-capable.
 
 Earlier deterioration events are kept as valid history if they happened before `window_end`. For example:
 
@@ -781,7 +781,7 @@ This helper automatically removes rows where `eligible_y_o2 != 1` and removes ro
 
 ### 8.3 First-deterioration subset
 
-The same v8 dataset can also be used for first-deterioration prediction.
+The same final dataset can also be used for first-deterioration prediction.
 
 First-deterioration windows are rows where no deterioration event happened before `window_end`:
 
@@ -833,10 +833,10 @@ After case-level split assignment, every generated window inherits the split of 
 
 ## 10. Output Files
 
-The v8 output folder is:
+The output folder is:
 
 ```text
-/content/drive/My Drive/merged_240920_240822_prepared/nonsequential_window_dataset_v8_cascade
+/content/drive/My Drive/merged_240920_240822_prepared/nonsequential_window_dataset_cascade
 ```
 
 ### 10.1 Final modelling datasets
@@ -922,11 +922,8 @@ Important modelling reminders:
 
    `y_any` is useful for general deterioration prediction, but HD/ICU transfer, O2 increase, IV increase, MET activation, and death may follow different clinical pathways. Event-specific models should still be compared.
 
-2. **Charted and sensor vital signs are merged into one clinical stream.**
 
-   This improves interpretability, but charted and sensor measurements may differ in frequency, noise level, and clinical meaning. Later versions may compare merged versus source-separated vital streams.
-
-3. **Secondary diagnosis grouping is keyword-based.**
+2. **Secondary diagnosis grouping is keyword-based.**
 
    Grouped secondary diagnosis features are more interpretable than sparse raw diagnosis dummies, but keyword grouping may miss some clinically relevant diagnoses or include imperfect matches.
 
@@ -937,7 +934,7 @@ Important modelling reminders:
 Main dataset-building notebook:
 
 ```text
-Dataset_nonsequential_final.ipynb
+dataset_nonsequential_final.ipynb
 ```
 
 Key implementation choices:
@@ -961,7 +958,7 @@ This section records the review questions used to make the README clearer for a 
 | Confusion question | Clarification added |
 |---|---|
 | What exactly is one row in the final dataset? | Added Quick Orientation section explaining one row = one case-window |
-| Are the notebook inputs raw files or prepared merged files? | Separated original raw data structure from files directly loaded by v8 |
+| Are the notebook inputs raw files or prepared merged files? | Separated original raw data structure from files directly loaded by the final notebook |
 | What is the difference between case-level positive and window-level positive? | Added Section 7.6 |
 | Why are some target values missing? | Explained target eligibility and already-happened events |
 | When is a window discarded? | Clarified full-horizon observability rule and added Mermaid-safe flowchart |
