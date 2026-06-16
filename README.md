@@ -585,7 +585,7 @@ These features are leakage-safe because they are known at prediction time.
 
 ---
 
-## 9. Mentor-Review Areas to Address
+## 9. Areas to Address
 
 This section summarizes the audit checks requested before moving into modelling.
 
@@ -659,20 +659,20 @@ Requested check:
 
 Horizon-censoring summary across all splits:
 
-| m hours | h hours | Windows before filter | Windows after filter | Removed windows | Removed rate |
-| --- | --- | --- | --- | --- | --- |
-| 4 | 4 | 74971 | 73207 | 1764 | 2.4% |
-| 4 | 6 | 74971 | 72325 | 2646 | 3.5% |
-| 4 | 12 | 74971 | 69687 | 5284 | 7.0% |
-| 6 | 4 | 74089 | 72325 | 1764 | 2.4% |
-| 6 | 6 | 74089 | 71445 | 2644 | 3.6% |
-| 6 | 12 | 74089 | 68812 | 5277 | 7.1% |
-| 12 | 4 | 71445 | 69687 | 1758 | 2.5% |
-| 12 | 6 | 71445 | 68812 | 2633 | 3.7% |
-| 12 | 12 | 71445 | 66222 | 5223 | 7.3% |
-| 24 | 4 | 66222 | 64552 | 1670 | 2.5% |
-| 24 | 6 | 66222 | 63729 | 2493 | 3.8% |
-| 24 | 12 | 66222 | 61283 | 4939 | 7.5% |
+| m hours | h hours | Windows before filter | Windows after filter | Removed windows | Removed rate | Removed windows with partial O2/IV/MET event |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4 | 4 | 74971 | 73207 | 1764 | 2.4% | Not available in uploaded result package |
+| 4 | 6 | 74971 | 72325 | 2646 | 3.5% | Not available in uploaded result package |
+| 4 | 12 | 74971 | 69687 | 5284 | 7.0% | Not available in uploaded result package |
+| 6 | 4 | 74089 | 72325 | 1764 | 2.4% | Not available in uploaded result package |
+| 6 | 6 | 74089 | 71445 | 2644 | 3.6% | Not available in uploaded result package |
+| 6 | 12 | 74089 | 68812 | 5277 | 7.1% | Not available in uploaded result package |
+| 12 | 4 | 71445 | 69687 | 1758 | 2.5% | Not available in uploaded result package |
+| 12 | 6 | 71445 | 68812 | 2633 | 3.7% | Not available in uploaded result package |
+| 12 | 12 | 71445 | 66222 | 5223 | 7.3% | Not available in uploaded result package |
+| 24 | 4 | 66222 | 64552 | 1670 | 2.5% | Not available in uploaded result package |
+| 24 | 6 | 66222 | 63729 | 2493 | 3.8% | Not available in uploaded result package |
+| 24 | 12 | 66222 | 61283 | 4939 | 7.5% | Not available in uploaded result package |
 
 Interpretation:
 
@@ -680,13 +680,23 @@ Interpretation:
 - Removed rates range from **2.4%** to **7.5%**.
 - As expected, longer prediction horizons remove more late-stay windows because more future follow-up is required before `Movement End DT`.
 - The highest censoring rate is for `m=24, h=12`, at **7.5%**.
-- These rates should be reported, but they are not high enough by themselves to invalidate the sliding-window datasets.
+- The uploaded global horizon-censoring file reports how many windows were removed, but it does **not** include the newly added partial-positive audit columns from the updated notebook.
+- Therefore, this README does not claim exact deleted-positive counts by `m/h`. To fill the final column, rerun the optional sliding-window generation with the updated notebook and use `mentor_review_audit/horizon_censoring_by_m_h_summary.csv`, especially the `removed_windows_with_partial_o2_iv_met_event` column.
+- These censoring rates should still be reported, but they are not high enough by themselves to invalidate the sliding-window datasets.
 
 ### 9.4 Area 4: `eligible_y_any` logic validation
 
 Requested check:
 
 > Verify that a patient who already had one event can still be eligible for `y_any` if other events have not yet occurred.
+
+Validation procedure:
+
+1. For each labelled window, the notebook first checks every individual event-specific eligibility flag: `eligible_y_hd_icu`, `eligible_y_o2`, `eligible_y_iv`, `eligible_y_met`, and `eligible_y_death`.
+2. A target-specific eligibility flag is set to 0 only when that same event had already occurred before `window_end`. For example, a prior IV event makes `eligible_y_iv = 0`.
+3. The expected composite eligibility is then recalculated independently as: `eligible_y_any = 1` if at least one individual event remains eligible, and `eligible_y_any = 0` only if all individual event targets are already ineligible.
+4. The recalculated expected value is compared against the notebook-generated `eligible_y_any` column for every row in the selected patient trace.
+5. The audit also counts mixed-eligibility rows, where at least one event is already ineligible but `eligible_y_any` should still remain eligible because another event has not happened yet.
 
 Validation result from the patient trace audit:
 
@@ -720,25 +730,47 @@ Reasoning:
 - In the generated summaries, `m=6, h=12` retained 68,812 windows and had 69 `y_any` positive cases, 58 `y_iv` positive cases, 19 `y_o2` positive cases, and 4 `y_met` positive cases across all splits.
 - HD/ICU and death still have zero short-horizon sliding-window positives, so they should not be the main targets for this track.
 
-For the case-level HD/ICU/death track, a reasonable starting feature window is:
+For case-level event prediction, the recommended modelling plan is to treat the eight case-level feature-window datasets as the main design choices:
 
 ```text
+early_6h
 early_12h
+early_24h
+full_stay
+last_3h
+last_6h
+last_12h
+last_24h
 ```
 
-Reasoning:
+Each feature-window dataset already contains the information available inside that selected window, including demographics, diagnosis features, vital-sign summaries and trends, and known O2/IV/MET event history up to the feature-window end. Therefore, the first modelling comparison should be across clinically meaningful feature-window designs, not across small internal vital-summary variants such as baseline/recent or last-30-minute-only features.
 
-- `early_12h` remains close to deployable early prediction.
-- It provides more vital-sign information than `early_6h`.
-- It loses only one case compared with `early_6h` in the generated summaries.
-- It has 139 HD/ICU-or-death positive cases across all splits, about 31.6% of the retained rows.
+Case-level targets to model first:
 
-Suggested first modelling plan:
+| Target | Interpretation | Positive cases in current summaries |
+|---|---|---:|
+| `case_y_death_1m` | Death within 1 month | 45 |
+| `case_y_death_3m` | Death within 3 months | 45 |
+| `case_y_hd_icu` | HD/ICU transfer | 64 to 69, depending on feature-window availability |
+| `case_y_hd_icu_or_death` | Composite HD/ICU transfer or death | 134 to 140, depending on feature-window availability |
 
-1. Start HD/ICU/death modelling with `early_12h` case-level data.
-2. Use `early_6h` as a more aggressive early-warning comparison.
-3. Use `early_24h`, `full_stay`, and last-window designs as sensitivity or signal-analysis experiments.
-4. Start IV/O2/MET sliding-window modelling with `m=6, h=12`.
+Recommended first modelling grid for one modelling approach, such as LightGBM:
+
+| Design group | Feature-window design | Reason |
+|---|---|---|
+| Single early windows | `early_6h`, `early_12h`, `early_24h` | Tests how much early ward information is needed for deployable prediction |
+| Single full/late windows | `full_stay`, `last_3h`, `last_6h`, `last_12h`, `last_24h` | Tests retrospective and near-end-of-stay signal strength |
+| Early-window combination | `early_6h + early_12h + early_24h` | Tests whether early trajectory summaries add value across early periods |
+| Late-window combination | `last_3h + last_6h + last_12h + last_24h` | Tests whether near-transfer or near-discharge physiology carries stronger signal |
+| All-window combination | all 8 feature-window datasets | Tests the full case-level feature-window signal as an upper-bound comparison |
+
+This gives **11 feature-window designs**. With the four case-level targets above, one modelling approach requires:
+
+```text
+11 feature-window designs × 4 targets = 44 training trials
+```
+
+This is a manageable first-pass modelling grid. It is also systematic enough to compare early deployable prediction against late retrospective signal, while keeping computational cost controlled.
 
 ---
 
@@ -762,11 +794,11 @@ The generated audit trace uses:
 | Target | Positive windows | Ineligible windows | Censored windows | Main interpretation |
 |---|---:|---:|---:|---|
 | `y_any` | 36 | 0 | 12 | Any new event occurred in 36 labelled windows |
-| `y_hd_icu` | 0 | 0 | 12 | No HD/ICU event occurred inside labelled horizons for this case |
+| `y_hd_icu` | 0 | 0 | 12 | HD/ICU occurred at Movement End, so it was not inside any fully labelled future horizon |
 | `y_o2` | 12 | 0 | 12 | O2 increase appeared in 12 future horizons |
 | `y_iv` | 12 | 498 | 12 | IV became ineligible after IV had already occurred |
 | `y_met` | 12 | 660 | 12 | MET became ineligible after MET had already occurred |
-| `y_death` | 0 | 0 | 12 | No death event occurred inside labelled horizons for this case |
+| `y_death` | 0 | 0 | 12 | Death occurred after W36 and was not part of the ward-window trace |
 
 This trace confirms the intended pipeline behaviour:
 
@@ -793,6 +825,28 @@ patient_trace_timeline_case_4366de1ae1_m6_h12.png
 ![Patient trace timeline](patient_trace_timeline_case_4366de1ae1_m6_h12.png)
 
 The CSV trace remains the formal audit output. The figure is mainly for discussion because it visually shows observation windows, prediction horizons, event times, and windows censored by Movement End.
+
+### 10.3 Zoomed trace around deterioration events
+
+The updated notebook also creates a focused trace for the 30 candidate windows closest to each in-W36 event:
+
+```text
+mentor_review_audit/patient_trace_30_closest_windows_by_event_case_4366de1ae1_m6_h12.csv
+mentor_review_audit/patient_trace_30_closest_windows_by_event_case_4366de1ae1_m6_h12.png
+```
+
+This zoomed trace includes O2, IV, MET, and HD/ICU when their event times fall inside the W36 movement interval. Death is intentionally excluded from this zoomed figure because the death event for this project is usually after W36/after ICU transfer rather than an in-ward deterioration timestamp.
+
+Zoomed trace summary:
+
+| Event focus | Windows shown | Positive windows for that event | Ineligible windows for that event | Censored windows |
+|---|---:|---:|---:|---:|
+| O2 | 30 | 12 | 0 | 12 |
+| IV | 30 | 12 | 15 | 0 |
+| MET | 30 | 12 | 15 | 0 |
+| HD/ICU | 30 | 0 | 0 | 12 |
+
+The zoomed view is useful for discussion because it shows the transition from negative windows to positive windows, then to ineligible windows after the event has already occurred.
 
 ---
 
@@ -854,16 +908,17 @@ The word “optional” means the notebook creates these features, but the model
 
 ## 13. How to Use the Final CSVs for Modelling
 
-### 13.1 Case-level HD/ICU/death modelling
+### 13.1 Case-level event modelling
 
 A typical workflow is:
 
-1. Choose one feature-window folder, such as `case_level_ward_outcome/early_12h`.
-2. Load `train_early_12h.csv`, `validation_early_12h.csv`, and `test_early_12h.csv`.
-3. Choose one target, such as `case_y_hd_icu_or_death`.
-4. Filter to eligible rows for that target using the matching `eligible_case_y_*` column, or use `prepare_case_level_model_data(...)` from the notebook.
-5. Choose a feature set, such as `patient_dx_vital_with_baseline_recent` or `full_case_level_feature_set`.
-6. Train and evaluate the model.
+1. Choose one case-level target: `case_y_death_1m`, `case_y_death_3m`, `case_y_hd_icu`, or `case_y_hd_icu_or_death`.
+2. Start with the eight single feature-window folders: `early_6h`, `early_12h`, `early_24h`, `full_stay`, `last_3h`, `last_6h`, `last_12h`, and `last_24h`.
+3. For each selected folder, load the matching train, validation, and test CSV files.
+4. Filter to eligible rows for the chosen target using the matching `eligible_case_y_*` column, or use `prepare_case_level_model_data(...)` from the notebook.
+5. Use the available case-level predictors inside that feature-window dataset, including demographics, diagnosis features, vital summaries/trends, and known O2/IV/MET event history up to the feature-window end.
+6. After the eight single-window models, test three grouped feature-window designs: early-only (`early_6h + early_12h + early_24h`), late-only (`last_3h + last_6h + last_12h + last_24h`), and all eight windows.
+7. Train and evaluate the model.
 
 Important reminders:
 
@@ -947,6 +1002,8 @@ Important files:
 | `patient_trace_case_*.csv` | Readable patient trace across all candidate windows |
 | `patient_trace_actual_pipeline_labelled_case_*.csv` | Selected case after the actual labelling function |
 | `patient_trace_timeline_case_*.png` | Timeline visualization for discussion |
+| `patient_trace_30_closest_windows_by_event_case_*.csv` | Zoomed trace table for the 30 windows closest to each in-W36 event |
+| `patient_trace_30_closest_windows_by_event_case_*.png` | Zoomed event-window visualization for discussion |
 
 ---
 
@@ -1000,7 +1057,7 @@ Key implementation choices:
 - Vital features include summary, trend, missingness, baseline/recent, and short-recent features.
 - Event timestamps are used for label construction, eligibility, and audit checks, then removed from final model-ready CSVs.
 - Eligibility columns are used for target-specific filtering, not as model predictors.
-- Case-level early windows are most suitable for deployable HD/ICU/death-style prediction.
+- Case-level event modelling should first compare the eight feature-window datasets, then early-only, late-only, and all-window grouped designs.
 - Sliding-window datasets are most suitable for IV/O2/MET-style timed short-horizon prediction.
 
 ---
@@ -1019,4 +1076,4 @@ Key implementation choices:
 | Are prior events leakage? | Explained that prior events before prediction time are valid cascade features |
 | What should not be used as predictors? | Listed metadata, target, eligibility, and event-time columns as non-predictors |
 | What did the mentor-review audits find? | Added separate sections for all five requested areas plus one-patient trace |
-| Which modelling setup should start first? | Recommended `early_12h` for case-level HD/ICU/death and `m=6, h=12` for sliding-window IV/O2/MET |
+| Which modelling setup should start first? | Recommended the 11-design case-level event modelling grid and `m=6, h=12` for sliding-window IV/O2/MET |
